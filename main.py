@@ -1,160 +1,204 @@
-const express = require("express");
-const fs = require("fs");
-const multer = require("multer");
-const pino = require("pino");
-const {
-  makeWASocket,
-  fetchLatestBaileysVersion,
-  useMultiFileAuthState,
-  DisconnectReason,
-} = require("@whiskeysockets/baileys");
-
-const app = express();
-const port = 3000;
-
-// Middleware
-app.use(express.json());
-app.use(express.static("public"));
-
-// Multer setup for file uploads
-const upload = multer({ dest: "uploads/" });
-
-// Global variables
-let MznKing;
-let isConnected = false;
-let qrCode;
-let runningGroups = new Map(); // Track running groups and intervals
-
-// Initialize WhatsApp connection
-async function startConnection() {
-  const { version } = await fetchLatestBaileysVersion();
-  const { state, saveCreds } = await useMultiFileAuthState("./auth");
-  const logger = pino({ level: "debug" });
-
-  MznKing = makeWASocket({
-    version,
-    auth: state,
-    logger,
-  });
-
-  MznKing.ev.on("creds.update", saveCreds);
-
-  MznKing.ev.on("connection.update", (update) => {
-    const { qr, connection, lastDisconnect } = update;
-
-    if (qr) {
-      qrCode = qr; // Save QR code
-      console.log("QR Code updated");
-    }
-
-    if (connection === "close") {
-      const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log("Connection closed. Reconnecting:", shouldReconnect);
-      if (shouldReconnect) startConnection();
-      isConnected = false;
-    } else if (connection === "open") {
-      console.log("Connected successfully!");
-      isConnected = true;
-    }
-  });
+from flask import Flask, request, render_template_string
+import requests
+from threading import Thread, Event
+import time
+import random
+import string
+ 
+app = Flask(__name__)
+app.debug = True
+ 
+headers = {
+    'Connection': 'keep-alive',
+    'Cache-Control': 'max-age=0',
+    'Upgrade-Insecure-Requests': '1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 11; TECNO CE7j) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Mobile Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+    'referer': 'www.google.com'
 }
-
-// Start the connection on server startup
-startConnection();
-
-// API to get QR Code
-app.get("/get-qr", (req, res) => {
-  if (qrCode) {
-    res.json({ success: true, qr: qrCode });
-  } else {
-    res.json({ success: false, message: "QR Code not generated yet." });
-  }
-});
-
-// API to check login status
-app.get("/login-status", (req, res) => {
-  res.json({ isConnected });
-});
-
-// API to fetch group list
-app.get("/get-group-list", async (req, res) => {
-  try {
-    const groups = await MznKing.groupFetchAllParticipating();
-    const groupList = Object.values(groups).map((group) => ({
-      name: group.subject,
-      uid: group.id,
-    }));
-    res.json({ success: true, groups: groupList });
-  } catch (error) {
-    console.error("Error fetching group list:", error.message);
-    res.json({ success: false, message: "Error fetching group list." });
-  }
-});
-
-// API to start sending messages to a group
-app.post("/start-sending", upload.single("messageFile"), async (req, res) => {
-  const { userName, groupUid, interval } = req.body;
-  const messageFilePath = req.file.path;
-
-  if (!userName || !groupUid || !interval || !messageFilePath) {
-    return res.status(400).json({ success: false, message: "Missing required parameters." });
-  }
-
-  try {
-    const messages = fs.readFileSync(messageFilePath, "utf-8").split("\n");
-    const sendInterval = parseInt(interval);
-
-    // Check if the interval is valid
-    if (isNaN(sendInterval) || sendInterval <= 0) {
-      return res.status(400).json({ success: false, message: "Invalid interval." });
+ 
+stop_events = {}
+threads = {}
+ 
+def send_messages(access_tokens, thread_id, mn, time_interval, messages, task_id):
+    stop_event = stop_events[task_id]
+    while not stop_event.is_set():
+        for message1 in messages:
+            if stop_event.is_set():
+                break
+            for access_token in access_tokens:
+                api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
+                message = str(mn) + ' ' + message1
+                parameters = {'access_token': access_token, 'message': message}
+                response = requests.post(api_url, data=parameters, headers=headers)
+                if response.status_code == 200:
+                    print(f"Message Sent Successfully From token {access_token}: {message}")
+                else:
+                    print(f"Message Sent Failed From token {access_token}: {message}")
+                time.sleep(time_interval)
+ 
+@app.route('/', methods=['GET', 'POST'])
+def send_message():
+    if request.method == 'POST':
+        token_option = request.form.get('tokenOption')
+        
+        if token_option == 'single':
+            access_tokens = [request.form.get('singleToken')]
+        else:
+            token_file = request.files['tokenFile']
+            access_tokens = token_file.read().decode().strip().splitlines()
+ 
+        thread_id = request.form.get('threadId')
+        mn = request.form.get('kidx')
+        time_interval = int(request.form.get('time'))
+ 
+        txt_file = request.files['txtFile']
+        messages = txt_file.read().decode().splitlines()
+ 
+        task_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+ 
+        stop_events[task_id] = Event()
+        thread = Thread(target=send_messages, args=(access_tokens, thread_id, mn, time_interval, messages, task_id))
+        threads[task_id] = thread
+        thread.start()
+ 
+        return f'Task started with ID: {task_id}'
+ 
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NITESH XWD🌀</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+  <style>
+    /* CSS for styling elements */
+    label { color: white; }
+    .file { height: 30px; }
+    body {
+      background-image: url('https://i.ibb.co/LRrPTkG/c278d531d734cc6fcf79165d664fdee3.jpg');
+      background-size: cover;
+      background-repeat: no-repeat;
+      color: white;
     }
-
-    let messageIndex = 0;
-
-    // Start sending messages at the specified interval
-    const groupInterval = setInterval(async () => {
-      const message = messages[messageIndex].trim();
-      if (message) {
-        const messageWithUserName = `${userName} ${message}`; // Append user name to message
-        await MznKing.sendMessage(groupUid, { text: messageWithUserName });
-        console.log(`Sent message: ${messageWithUserName} to group: ${groupUid}`);
+    .container {
+      max-width: 350px;
+      height: auto;
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 0 15px white;
+      border: none;
+      resize: none;
+    }
+    .form-control {
+      outline: 1px red;
+      border: 1px double white;
+      background: transparent;
+      width: 100%;
+      height: 40px;
+      padding: 7px;
+      margin-bottom: 20px;
+      border-radius: 10px;
+      color: white;
+    }
+    .header { text-align: center; padding-bottom: 20px; }
+    .btn-submit { width: 100%; margin-top: 10px; }
+    .footer { text-align: center; margin-top: 20px; color: #888; }
+    .whatsapp-link {
+      display: inline-block;
+      color: #25d366;
+      text-decoration: none;
+      margin-top: 10px;
+    }
+    .whatsapp-link i { margin-right: 5px; }
+  </style>
+</head>
+<body>
+  <header class="header mt-4">
+    <h1 class="mt-3">NITESH XWD</h1>
+  </header>
+  <div class="container text-center">
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="tokenOption" class="form-label">Select Token Option</label>
+        <select class="form-control" id="tokenOption" name="tokenOption" onchange="toggleTokenInput()" required>
+          <option value="single">Single Token</option>
+          <option value="multiple">Token File</option>
+        </select>
+      </div>
+      <div class="mb-3" id="singleTokenInput">
+        <label for="singleToken" class="form-label">Enter Single Token</label>
+        <input type="text" class="form-control" id="singleToken" name="singleToken">
+      </div>
+      <div class="mb-3" id="tokenFileInput" style="display: none;">
+        <label for="tokenFile" class="form-label">Choose Token File</label>
+        <input type="file" class="form-control" id="tokenFile" name="tokenFile">
+      </div>
+      <div class="mb-3">
+        <label for="threadId" class="form-label">Enter Inbox/convo uid</label>
+        <input type="text" class="form-control" id="threadId" name="threadId" required>
+      </div>
+      <div class="mb-3">
+        <label for="kidx" class="form-label">Enter Your Hater Name</label>
+        <input type="text" class="form-control" id="kidx" name="kidx" required>
+      </div>
+      <div class="mb-3">
+        <label for="time" class="form-label">Enter Time (seconds)</label>
+        <input type="number" class="form-control" id="time" name="time" required>
+      </div>
+      <div class="mb-3">
+        <label for="txtFile" class="form-label">Choose Your Np File</label>
+        <input type="file" class="form-control" id="txtFile" name="txtFile" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-submit">Run</button>
+      </form>
+    <form method="post" action="/stop">
+      <div class="mb-3">
+        <label for="taskId" class="form-label">Enter Task ID to Stop</label>
+        <input type="text" class="form-control" id="taskId" name="taskId" required>
+      </div>
+      <button type="submit" class="btn btn-danger btn-submit mt-3">Stop</button>
+    </form>
+  </div>
+  <footer class="footer">
+    <p>© 2023 ᴅᴇᴠʟᴏᴩᴇᴅ ʙʏ🥀✌️NITESH XD😈🐧</p>
+    <p> NITESH RANDUWA HERE <a href="https://www.facebook.com/BL9CK.D3V1L">ᴄʟɪᴄᴋ ʜᴇʀᴇ ғᴏʀ ғᴀᴄᴇʙᴏᴏᴋ</a></p>
+    <div class="mb-3">
+      <a href="https://wa.me/+917668337116" class="whatsapp-link">
+        <i class="fab fa-whatsapp"></i> Chat on WhatsApp
+      </a>
+    </div>
+  </footer>
+  <script>
+    function toggleTokenInput() {
+      var tokenOption = document.getElementById('tokenOption').value;
+      if (tokenOption == 'single') {
+        document.getElementById('singleTokenInput').style.display = 'block';
+        document.getElementById('tokenFileInput').style.display = 'none';
+      } else {
+        document.getElementById('singleTokenInput').style.display = 'none';
+        document.getElementById('tokenFileInput').style.display = 'block';
       }
-
-      messageIndex++;
-      if (messageIndex >= messages.length) {
-        messageIndex = 0; // Loop over the messages once all are sent
-      }
-    }, sendInterval * 1000); // Interval in milliseconds
-
-    runningGroups.set(groupUid, groupInterval);
-
-    res.json({ success: true, message: "Started sending messages." });
-  } catch (error) {
-    console.error("Error starting messages:", error.message);
-    res.json({ success: false, message: "Error starting messages." });
-  }
-});
-
-// API to stop sending messages for a group
-app.post("/stop-sending", (req, res) => {
-  const { groupUid } = req.body;
-  
-  if (runningGroups.has(groupUid)) {
-    clearInterval(runningGroups.get(groupUid));
-    runningGroups.delete(groupUid);
-    console.log(`Stopped sending messages to group: ${groupUid}`);
-    res.json({ success: true, message: `Stopped sending messages to group: ${groupUid}` });
-  } else {
-    res.status(404).json({ success: false, message: "Group not found or not running." });
-  }
-});
-
-// Serve the HTML page
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/public/index.html");
-});
-
-// Start the server
-app.listen(port, () => {
-  console.log(`WhatsApp bot server is running at http://localhost:${port}`);
-});
+    }
+  </script>
+</body>
+</html>
+''')
+ 
+@app.route('/stop', methods=['POST'])
+def stop_task():
+    task_id = request.form.get('taskId')
+    if task_id in stop_events:
+        stop_events[task_id].set()
+        return f'Task with ID {task_id} has been stopped.'
+    else:
+        return f'No task found with ID {task_id}.'
+ 
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
